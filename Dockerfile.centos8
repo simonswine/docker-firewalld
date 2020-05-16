@@ -1,0 +1,7 @@
+FROM centos:8
+
+RUN dnf -y install firewalld systemd && \
+    dnf clean all && \
+    rm -rf /var/cache/yum
+
+ENTRYPOINT firewall-cmd

@@ -1,0 +1,111 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  annotations:
+  labels:
+    app: firewalld-node
+  name: firewalld-node
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      app: firewalld-node
+  template:
+    metadata:
+      labels:
+        app: firewalld-node
+    spec:
+      containers:
+      - name: firewalld
+        image: docker.io/simonswine/firewalld:0.1-centos7
+        imagePullPolicy: IfNotPresent
+        resources:
+          requests:
+            cpu: 10m
+        securityContext:
+          privileged: true
+        volumeMounts:
+        - mountPath: /run/dbus/system_bus_socket
+          name: dbus-socket
+          readOnly: true
+        command:
+        - /bin/bash
+        - -c
+        - |
+          set -euo pipefail
+
+          FW="firewall-cmd"
+          FWP="$FW --permanent"
+
+          function ensure_service {
+              $FWP "--info-service=$1" > /dev/null || $FWP "--new-service-from-file=$tmpfile" --name "$1"
+          }
+
+          function ensure_services {
+              cat > $tmpfile <<EOF
+          <?xml version="1.0" encoding="utf-8"?>
+          <service>
+           <short>kubelet</short>
+           <description>Kubelet port to be called by APIservers</description>
+           <port protocol="tcp" port="10250" />
+          </service>
+          EOF
+              ensure_service "kubelet"
+
+              cat > $tmpfile <<EOF
+          <?xml version="1.0" encoding="utf-8"?>
+          <service>
+           <short>kube-apiserver</short>
+           <description>Kube APIserver 6443 port</description>
+           <port protocol="tcp" port="6443" />
+          </service>
+          EOF
+              ensure_service "kube-apiserver"
+
+              cat > $tmpfile <<EOF
+          <?xml version="1.0" encoding="utf-8"?>
+          <service>
+           <short>calico</short>
+           <description>Calico overlay network reuqirements</description>
+           <port protocol="tcp" port="179" />  <!--BGP-->
+           <protocol value="4"/>               <!--IP-in-IP-->
+          </service>
+          EOF
+              ensure_service "calico"
+          }
+
+          # setup temporary file
+          tmpfile=$(mktemp serviceXXXXXX.xml)
+          function cleanup {
+            rm -rf "$tmpfile"
+          }
+          trap cleanup EXIT
+
+          ensure_services
+
+          $FWP --zone=internal --add-service=calico
+          $FWP --zone=internal --add-service=kubelet
+
+          $FWP --zone=public   --add-interface=eth0
+          $FWP --zone=internal --add-interface=eth1
+
+          $FW --reload
+
+          # wait forever and exit cleanly
+          sleep infinity & PID=$!
+          trap "kill $PID" INT TERM
+          wait
+
+      nodeSelector:
+        kubernetes.io/os: linux
+      priorityClassName: system-node-critical
+      restartPolicy: Always
+      volumes:
+      - hostPath:
+          path: /run/dbus/system_bus_socket
+          type: Socket
+        name: dbus-socket
+  updateStrategy:
+    rollingUpdate:
+      maxUnavailable: 1
+    type: RollingUpdate
